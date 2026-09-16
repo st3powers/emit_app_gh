@@ -1,5 +1,5 @@
 venv/
-__pycache__/
-*.pyc
 backend/data/
 backend/overlays/
+__pycache__/
+*.pyc

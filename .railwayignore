@@ -1,0 +1,7 @@
+# Not part of the deployable app -- excluded from the upload Railway builds from.
+venv/
+backend/data/
+backend/overlays/
+__pycache__/
+*.pyc
+.claude/

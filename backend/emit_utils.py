@@ -149,9 +149,12 @@ def make_rgb_overlay(nc_path: Path, granule_id: str):
         # reflectance is stored contiguous/uncompressed with bands as the
         # fastest-varying dimension per pixel, so `refl[:, :, i]` for a single
         # band strides across the whole extent -- reading 3 bands that way is
-        # 3 full passes over the file. Read the full array once (one
-        # sequential pass) and slice the 3 bands out of memory instead.
-        swath_rgb = refl[:][:, :, rgb_idx]
+        # 3 full passes over the file. A single fancy-indexed read (one
+        # hyperslab selection covering all 3 bands) is one pass instead of
+        # three, WITHOUT `refl[:]`'s ~1.8 GB full-array read -- that blew past
+        # the memory limit on a small cloud instance (observed as repeated
+        # OOM kills in production; fine on a dev machine with RAM to spare).
+        swath_rgb = refl[:, :, rgb_idx]
 
         glt_x, glt_y, gt = _read_glt(ds)
         # both indices must be set; 0 marks nodata in either plane
