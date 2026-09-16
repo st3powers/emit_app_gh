@@ -49,9 +49,16 @@ downloadMapPngBtn.onclick = async () => {
     // draw TileLayer and Marker, silently dropping the raster overlay and
     // footprint outlines, which defeats the point of this feature.
     const canvas = await html2canvas(document.getElementById('map'), { useCORS: true, logging: false });
+    // Same lat/lon-in-filename convention as the spectrum PNG downloads,
+    // using the point behind the last-plotted spectrum (if it's for the
+    // scene currently on screen) so the map, CSV, and spectrum PNGs from
+    // the same click all name-match.
+    const granuleId = activeGranule || 'emit_map';
+    const pt = (lastSpectrum && lastSpectrum.granuleId === activeGranule) ? lastSpectrum : null;
+    const suffix = pt ? `${pt.lat.toFixed(5)}_${pt.lon.toFixed(5)}_map_view` : 'map_view';
     const a = document.createElement('a');
     a.href = canvas.toDataURL('image/png');
-    a.download = `${activeGranule || 'emit_map'}_map_view.png`;
+    a.download = `${granuleId}_${suffix}.png`;
     document.body.appendChild(a);
     a.click();
     a.remove();
