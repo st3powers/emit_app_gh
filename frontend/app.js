@@ -1,7 +1,12 @@
 // frontend/app.js
 const map = L.map('map').setView([35, -110], 6);
+// crossOrigin so tile images can be read back into a canvas for the "Download
+// map PNG" control below -- OSM's tile server sends Access-Control-Allow-
+// Origin: *, but the browser only takes advantage of that if the <img> asked
+// for it; without this the exported canvas is cross-origin-tainted and
+// toDataURL() throws instead of producing an image.
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-  { attribution: '&copy; OpenStreetMap' }).addTo(map);
+  { attribution: '&copy; OpenStreetMap', crossOrigin: true }).addTo(map);
 
 // Footprint outlines (vector paths) and the raster overlay (a plain <img>)
 // both default to Leaflet's shared 'overlayPane', so which one ends up on
@@ -10,6 +15,54 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
 // raster. A dedicated, higher-z-index pane makes the raster win regardless.
 map.createPane('rasterPane');
 map.getPane('rasterPane').style.zIndex = 450; // default overlayPane is 400
+
+/* ---------- map screenshot ---------- */
+
+// A Leaflet control (not a plain absolutely-positioned <button>) so it sits
+// in the map's own bottom-right corner and follows Leaflet's usual control
+// conventions, rather than floating a foreign element over the map.
+const mapPngCtl = L.control({ position: 'bottomright' });
+mapPngCtl.onAdd = function () {
+  const div = L.DomUtil.create('div', 'leaflet-bar map-png-ctl');
+  div.innerHTML = '<button id="downloadMapPngBtn" type="button" hidden>Download map PNG</button>';
+  // Otherwise a click here also reaches the map's own click handler
+  // underneath, which would fire an unwanted spectrum lookup.
+  L.DomEvent.disableClickPropagation(div);
+  return div;
+};
+mapPngCtl.addTo(map);
+const downloadMapPngBtn = document.getElementById('downloadMapPngBtn');
+const mapPngCtlContainer = mapPngCtl.getContainer();
+
+downloadMapPngBtn.onclick = async () => {
+  const label = downloadMapPngBtn.textContent;
+  downloadMapPngBtn.disabled = true;
+  downloadMapPngBtn.textContent = 'Rendering…';
+  // Hidden during capture so the "Download map PNG" control doesn't appear
+  // inside its own screenshot.
+  mapPngCtlContainer.style.visibility = 'hidden';
+  try {
+    // html2canvas walks the actual rendered DOM (tiles, the EMIT raster
+    // <img> overlay, SVG footprint paths, the marker) rather than needing
+    // per-Leaflet-layer-type support -- tried leaflet-image first, but that
+    // library (unmaintained since the Leaflet 0.7 era) only knows how to
+    // draw TileLayer and Marker, silently dropping the raster overlay and
+    // footprint outlines, which defeats the point of this feature.
+    const canvas = await html2canvas(document.getElementById('map'), { useCORS: true, logging: false });
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = `${activeGranule || 'emit_map'}_map_view.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (err) {
+    setStatus(`Could not capture map image (${err.message || err})`, true);
+  } finally {
+    mapPngCtlContainer.style.visibility = '';
+    downloadMapPngBtn.disabled = false;
+    downloadMapPngBtn.textContent = label;
+  }
+};
 
 let footprintLayer = L.layerGroup().addTo(map);
 // Scene id -> its L.Polygon, so a specific scene's footprint can be
@@ -342,6 +395,7 @@ function selectScene(scene, el) {
   // No real overlay on the map yet -- these controls apply to it.
   overlayCtl.hidden = true;
   opacityCtl.hidden = true;
+  downloadMapPngBtn.hidden = true;
   // Thicker orange outline so it's clear which box on the map this scene is.
   setFootprintSelected(scene.id);
 
@@ -376,6 +430,7 @@ async function loadFullScene(scene) {
     overlayToggle.checked = true;
     overlayCtl.hidden = false;
     opacityCtl.hidden = false;
+    downloadMapPngBtn.hidden = false;
 
     activeGranule = scene.id;
     previewScene = null;

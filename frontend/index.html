@@ -38,6 +38,9 @@
     #downloadCsvBtn { margin:8px 2px 4px; cursor:pointer; }
     #downloadPngCtl { text-align:right; margin:8px 2px 4px; display:flex; justify-content:flex-end; gap:6px; }
     #downloadPngCtl button { cursor:pointer; }
+    /* Leaflet control in the map's own bottom-right corner. */
+    .map-png-ctl button { cursor:pointer; padding:5px 8px; font:12px sans-serif; background:#fff; border:2px solid rgba(0,0,0,0.2); border-radius:4px; }
+    .map-png-ctl button:disabled { cursor:default; color:#888; }
   </style>
 </head><body>
   <div id="map"></div>
@@ -81,6 +84,7 @@
     </div>
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
   <script src="app.js"></script>
 </body></html>
