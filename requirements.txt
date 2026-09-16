@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+earthaccess
+netCDF4
+numpy
+pillow
