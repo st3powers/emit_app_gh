@@ -123,7 +123,7 @@ def search_scenes(west: float, south: float, east: float, north: float,
                   # through "now", so new granules (2025, 2026, ...) show up
                   # without this default ever needing to be bumped.
                   date_start: str = "2022-01-01", date_end: Optional[str] = None,
-                  cloud_cover_max: float = 10):
+                  cloud_cover_max: float = 25):
     ensure_login()
     results = earthaccess.search_data(
         short_name="EMITL2ARFL",           # L2A surface reflectance
