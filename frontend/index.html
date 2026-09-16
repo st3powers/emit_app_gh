@@ -9,18 +9,58 @@
     #sceneList { max-height:30vh; overflow-y:auto; border:1px solid #eee; }
     .scene-item { cursor:pointer; padding:4px; border-bottom:1px solid #ddd; font-size:13px; }
     .scene-item:hover { background:#eef; }
-    #status { font-size:12px; padding:6px 2px; color:#555; min-height:1.2em; }
+    .scene-item-active { background:#dde; font-weight:600; }
+    #status { display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 2px; color:#555; min-height:1.2em; }
     #status.error { color:#b00020; }
-    #overlayCtl { display:block; font-size:13px; padding:4px 2px 8px; user-select:none; }
+    /* Tied to actual in-flight requests (see setBusy in app.js), so it's
+       never showing "working" after the last request has actually settled. */
+    #statusSpinner { flex:none; width:11px; height:11px; border:2px solid #ccd; border-top-color:#3388ff; border-radius:50%; animation:spin 0.8s linear infinite; }
+    #status.error #statusSpinner { border-top-color:#b00020; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    #cloudCtl { font-size:12px; color:#555; padding:6px 2px 4px; }
+    #cloudCtl input { vertical-align:middle; width:140px; }
+    /* :not([hidden]) so the `hidden` attribute -- overridden by a plain
+       #overlayCtl{display:block} rule, since same-specificity author CSS
+       beats the UA [hidden]{display:none} rule -- still wins. */
+    #overlayCtl:not([hidden]) { display:block; font-size:13px; padding:4px 2px 8px; user-select:none; }
     #overlayCtl input { vertical-align:middle; margin-right:5px; }
     #opacityCtl { font-size:12px; color:#555; padding:0 2px 8px; }
     #opacityCtl input { vertical-align:middle; width:120px; }
+    #browseCtl { margin:4px 2px 10px; }
+    #browseCtl .label { font-size:12px; color:#555; margin-bottom:4px; }
+    /* Zoom scales #browseImg's own width beyond 100%; the viewport clips and
+       scrolls it rather than the image affecting page layout. */
+    #browseViewport { width:100%; max-height:200px; overflow:auto; background:#000; border:1px solid #ccc; }
+    #browseImg { display:block; width:100%; }
+    #browseZoomCtl { display:flex; align-items:center; gap:6px; font-size:12px; color:#555; margin-top:4px; }
+    #browseZoomCtl button { cursor:pointer; padding:1px 9px; font-size:13px; line-height:1.5; }
+    #browseZoomLabel { min-width:38px; text-align:center; }
+    #downloadCsvBtn { margin:8px 2px 4px; cursor:pointer; }
+    #downloadPngCtl { text-align:right; margin:8px 2px 4px; display:flex; justify-content:flex-end; gap:6px; }
+    #downloadPngCtl button { cursor:pointer; }
   </style>
 </head><body>
   <div id="map"></div>
   <div id="panel">
     <button id="searchBtn">Search EMIT scenes in view</button>
-    <div id="status"></div>
+    <div id="cloudCtl">
+      Max cloud cover <input type="range" id="cloudCover" min="0" max="100" value="10">
+      <span id="cloudCoverVal">10%</span>
+    </div>
+    <div id="status"><span id="statusText"></span><span id="statusSpinner" hidden></span></div>
+
+    <div id="browseCtl" hidden>
+      <div class="label">NASA quicklook (raw swath, not orthorectified/rotated)</div>
+      <div id="browseViewport">
+        <img id="browseImg" alt="Scene quicklook">
+      </div>
+      <div id="browseZoomCtl">
+        <button id="browseZoomOut" type="button" title="Zoom out">−</button>
+        <span id="browseZoomLabel">100%</span>
+        <button id="browseZoomIn" type="button" title="Zoom in">+</button>
+        <button id="browseZoomReset" type="button" title="Reset zoom">Reset</button>
+      </div>
+    </div>
 
     <label id="overlayCtl" hidden>
       <input type="checkbox" id="overlayToggle" checked>
@@ -32,8 +72,13 @@
     </div>
 
     <div id="sceneList"></div>
+    <button id="downloadCsvBtn" type="button" hidden>Download spectrum as CSV</button>
     <div id="chartFull" class="chart"></div>
     <div id="chartVnir" class="chart"></div>
+    <div id="downloadPngCtl">
+      <button id="downloadFullPngBtn" type="button" hidden>Download full range PNG</button>
+      <button id="downloadVnirPngBtn" type="button" hidden>Download visible range PNG</button>
+    </div>
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>

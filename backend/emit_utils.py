@@ -1,12 +1,17 @@
 # backend/emit_utils.py
+import json
 import shutil
+from collections import OrderedDict
+
 import numpy as np
 import netCDF4 as nc
+import h5py
 import earthaccess
 from PIL import Image
 from pathlib import Path
 
-# An EMITL2ARFL bundle (RFL + RFLUNCERT + MASK) runs about 3.6 GB.
+# Only the _RFL_ file is ever downloaded (see download_granule); the largest
+# one observed so far is ~3.6 GB, so keep some headroom above that.
 BUNDLE_BYTES = 4 * 1024 ** 3
 
 # Anchored to this file, not the working directory, so the server can be
@@ -83,7 +88,14 @@ def download_granule(granule_id: str) -> Path:
     if not results:
         raise FileNotFoundError(f"CMR has no EMITL2ARFL granule {granule_id}")
 
-    files = earthaccess.download(results, str(DATA_DIR))
+    # The granule bundles three files (RFL + RFLUNCERT + MASK) but only RFL
+    # is ever read, so fetch just that link instead of the whole ~3.6 GB set.
+    rfl_urls = [u for u in results[0].data_links()
+                if _is_reflectance(Path(u).name)]
+    if not rfl_urls:
+        raise FileNotFoundError(f"No _RFL_ download link for {granule_id}")
+
+    files = earthaccess.download(rfl_urls, str(DATA_DIR))
     rfl = [f for f in files if _is_reflectance(Path(f).name)]
     if not rfl:
         raise FileNotFoundError(
@@ -134,7 +146,12 @@ def make_rgb_overlay(nc_path: Path, granule_id: str):
 
         # pick bands nearest to ~650/560/470 nm
         rgb_idx = [int(np.argmin(np.abs(wl - t))) for t in (650, 560, 470)]
-        swath_rgb = np.stack([refl[:, :, i] for i in rgb_idx], axis=-1)
+        # reflectance is stored contiguous/uncompressed with bands as the
+        # fastest-varying dimension per pixel, so `refl[:, :, i]` for a single
+        # band strides across the whole extent -- reading 3 bands that way is
+        # 3 full passes over the file. Read the full array once (one
+        # sequential pass) and slice the 3 bands out of memory instead.
+        swath_rgb = refl[:][:, :, rgb_idx]
 
         glt_x, glt_y, gt = _read_glt(ds)
         # both indices must be set; 0 marks nodata in either plane
@@ -167,6 +184,29 @@ def make_rgb_overlay(nc_path: Path, granule_id: str):
         ds.close()
 
 
+def _bounds_path(granule_id: str) -> Path:
+    return OVERLAY_DIR / f"{granule_id}.bounds.json"
+
+
+def get_or_make_rgb_overlay(nc_path: Path, granule_id: str):
+    """Cached wrapper around make_rgb_overlay.
+
+    Building the overlay means a full pass over the ~1.8 GB reflectance
+    array (see make_rgb_overlay), so re-selecting an already-loaded scene
+    should reuse the PNG rather than paying that cost again. Bounds are
+    cheap to recompute but are cached alongside the PNG anyway so a cache
+    hit needs no netCDF access at all.
+    """
+    png_path = OVERLAY_DIR / f"{granule_id}.png"
+    bounds_path = _bounds_path(granule_id)
+    if png_path.exists() and bounds_path.exists():
+        return png_path, json.loads(bounds_path.read_text())
+
+    png_path, bounds = make_rgb_overlay(nc_path, granule_id)
+    bounds_path.write_text(json.dumps(bounds))
+    return png_path, bounds
+
+
 def extract_spectrum(nc_path: Path, lat: float, lon: float):
     ds = _open(nc_path)
     try:
@@ -189,3 +229,69 @@ def extract_spectrum(nc_path: Path, lat: float, lon: float):
         return wl.tolist(), [None if np.isnan(v) else round(float(v), 5) for v in spectrum]
     finally:
         ds.close()
+
+
+# Open remote (un-downloaded) granule handles, keyed by granule id. Each is
+# an h5py.File over an earthaccess-authenticated HTTP file object: h5py
+# issues byte-range GETs for just the metadata/data it actually touches,
+# rather than reading the ~1.8 GB file start-to-finish. Kept open for the
+# process lifetime (bounded below) since re-opening pays a ~1-2s HDF5
+# object-header parse cost that a cache hit skips entirely.
+_REMOTE_CACHE_MAX = 8
+_remote_handles: "OrderedDict[str, h5py.File]" = OrderedDict()
+# Wavelengths don't vary click to click, but re-reading them was costing
+# almost as much as the pixel read itself (~1s) on every single request.
+_remote_wavelengths: dict = {}
+
+
+def _open_remote(granule_id: str) -> h5py.File:
+    if granule_id in _remote_handles:
+        _remote_handles.move_to_end(granule_id)
+        return _remote_handles[granule_id]
+
+    results = earthaccess.search_data(short_name="EMITL2ARFL", granule_ur=granule_id)
+    if not results:
+        raise FileNotFoundError(f"CMR has no EMITL2ARFL granule {granule_id}")
+    files = earthaccess.open(results)
+    rfl = [f for f in files if _is_reflectance(Path(f.path).name)]
+    if not rfl:
+        raise FileNotFoundError(f"No _RFL_ file to stream for {granule_id}")
+
+    ds = h5py.File(rfl[0], "r")
+    if len(_remote_handles) >= _REMOTE_CACHE_MAX:
+        oldest_id, oldest = _remote_handles.popitem(last=False)
+        oldest.close()
+        _remote_wavelengths.pop(oldest_id, None)
+    _remote_handles[granule_id] = ds
+    return ds
+
+
+def extract_spectrum_remote(granule_id: str, lat: float, lon: float):
+    """Same result as extract_spectrum, but over HTTP range requests instead
+    of a local download -- the fast path while the full granule is still
+    downloading in the background. Cheap because a single pixel's full
+    285-band spectrum is one small contiguous read (reflectance is stored
+    band-interleaved-by-pixel): unlike the RGB overlay, which needs bands
+    subset across every pixel, a single-pixel spectrum only ever touches its
+    own ~1 KB, plus a couple of small metadata/GLT reads.
+    """
+    ds = _open_remote(granule_id)
+    ulx, xres, _, uly, _, yres = ds.attrs["geotransform"]
+
+    col = int((lon - ulx) / xres)
+    row = int((lat - uly) / yres)
+    glt_x_ds = ds["location"]["glt_x"]
+    glt_y_ds = ds["location"]["glt_y"]
+    if not (0 <= row < glt_x_ds.shape[0] and 0 <= col < glt_x_ds.shape[1]):
+        return None, None
+    gx, gy = int(glt_x_ds[row, col]), int(glt_y_ds[row, col])
+    if gx <= 0 or gy <= 0:
+        return None, None
+
+    spectrum = ds["reflectance"][gy - 1, gx - 1, :].astype(float)
+    if granule_id not in _remote_wavelengths:
+        _remote_wavelengths[granule_id] = ds["sensor_band_parameters"]["wavelengths"][:].astype(float)
+    wl = _remote_wavelengths[granule_id]
+
+    spectrum[spectrum <= -0.005] = np.nan
+    return wl.tolist(), [None if np.isnan(v) else round(float(v), 5) for v in spectrum]

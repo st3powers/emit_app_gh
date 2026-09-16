@@ -7,6 +7,8 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +21,20 @@ FRONTEND_DIR = BASE_DIR.parent / "frontend"
 app = FastAPI(title="EMIT scene browser")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def no_browser_cache(request, call_next):
+    """Disable browser caching for everything this dev server serves.
+
+    StaticFiles sends no Cache-Control header, so browsers apply heuristic
+    freshness to app.js/index.html and can serve a stale copy on a normal
+    navigation without even revalidating against Last-Modified -- confusing
+    during active frontend development.
+    """
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 _auth = None
 
@@ -67,6 +83,29 @@ def _footprint(umm):
     return None
 
 
+def _bbox(footprint):
+    """Axis-aligned [[south, west], [north, east]] enclosing `footprint`."""
+    lats = [p[0] for p in footprint]
+    lons = [p[1] for p in footprint]
+    return [[min(lats), min(lons)], [max(lats), max(lons)]]
+
+
+def _browse_url(umm):
+    """Public quicklook PNG for a granule, or None if CMR has none.
+
+    This is CMR's pre-rendered "GET RELATED VISUALIZATION" link -- the raw
+    (non-orthorectified) swath as a browser-fetchable PNG, a few MB, no
+    Earthdata login required. It lets the UI show *something* the instant a
+    scene is picked, instead of waiting on the multi-GB granule download
+    that /api/load needs for a real georeferenced overlay.
+    """
+    for link in umm.get("RelatedUrls", []):
+        url = link.get("URL", "")
+        if link.get("Type") == "GET RELATED VISUALIZATION" and url.startswith("https://"):
+            return url
+    return None
+
+
 @app.get("/api/health")
 def health():
     """Confirm the server is up, and report whether Earthdata auth works."""
@@ -80,12 +119,22 @@ def health():
 
 @app.get("/api/search")
 def search_scenes(west: float, south: float, east: float, north: float,
-                  date_start: str = "2023-01-01", date_end: str = "2024-12-31"):
+                  # EMIT launched mid-2022; no end date means CMR searches
+                  # through "now", so new granules (2025, 2026, ...) show up
+                  # without this default ever needing to be bumped.
+                  date_start: str = "2022-01-01", date_end: Optional[str] = None,
+                  cloud_cover_max: float = 10):
     ensure_login()
     results = earthaccess.search_data(
         short_name="EMITL2ARFL",           # L2A surface reflectance
         bounding_box=(west, south, east, north),
         temporal=(date_start, date_end),
+        cloud_cover=(0, cloud_cover_max),
+        # Most-recent-first, so the count=50 cap keeps the newest scenes for
+        # AOIs with more matches than that -- otherwise it silently keeps
+        # only the *oldest* ones (CMR's default), which is why this used to
+        # look like results were "limited to 2023/2024".
+        sort_key="-start_date",
         count=50,
     )
     scenes = []
@@ -100,6 +149,9 @@ def search_scenes(west: float, south: float, east: float, north: float,
                 "id": umm["GranuleUR"],
                 "time": umm["TemporalExtent"]["RangeDateTime"]["BeginningDateTime"],
                 "footprint": footprint,
+                "browse_url": _browse_url(umm),
+                "browse_bounds": _bbox(footprint),
+                "cloud_cover": umm.get("CloudCover"),
             })
         except (KeyError, IndexError, TypeError):
             continue
@@ -119,7 +171,7 @@ def load_scene(granule_id: str):
         raise HTTPException(status_code=507, detail=str(exc))
 
     try:
-        png_path, bounds = emit_utils.make_rgb_overlay(nc_path, granule_id)
+        png_path, bounds = emit_utils.get_or_make_rgb_overlay(nc_path, granule_id)
     except (KeyError, OSError) as exc:
         raise HTTPException(status_code=500,
                             detail=f"Could not build overlay: {exc}")
@@ -139,6 +191,28 @@ def get_spectrum(granule_id: str, lat: float, lon: float):
         raise HTTPException(
             status_code=500,
             detail=f"Could not read {nc_path.name} ({exc}). Reload the scene.")
+    if wavelengths is None:
+        return {"error": "Point outside scene"}
+    return {"wavelengths": wavelengths, "reflectance": reflectance}
+
+
+@app.get("/api/spectrum_remote")
+def get_spectrum_remote(granule_id: str, lat: float, lon: float):
+    """Like /api/spectrum, but streams one pixel over HTTP range requests
+    instead of requiring download_granule() to have finished first -- the
+    fast path the UI uses while the full-resolution raster is still loading
+    in the background (~1-2s per click once the granule's remote handle is
+    warm, vs. however long the full download takes).
+    """
+    ensure_login()
+    try:
+        wavelengths, reflectance = emit_utils.extract_spectrum_remote(granule_id, lat, lon)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Remote read failed ({exc}). Waiting on the full-resolution download instead.")
     if wavelengths is None:
         return {"error": "Point outside scene"}
     return {"wavelengths": wavelengths, "reflectance": reflectance}

@@ -2,5 +2,6 @@ fastapi
 uvicorn[standard]
 earthaccess
 netCDF4
+h5py
 numpy
 pillow
