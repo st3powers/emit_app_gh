@@ -65,7 +65,28 @@ def granule_path(granule_id: str) -> Path:
     )
 
 
+# How many granules' worth of RFL downloads to keep on disk at once. Storage
+# here is ephemeral by design (no persistent volume), so nothing was ever
+# pruning it -- every scene loaded in a session stayed on disk for the life
+# of the container. On Railway's runtime, a downloaded file's page cache
+# counts against the container's memory limit, so letting this grow
+# unbounded (each file up to ~3.6 GB) eventually OOM-kills the process after
+# a handful of scenes -- observed in production. Keeping just the most
+# recent one bounds that to roughly one granule's worth, regardless of how
+# many different scenes get loaded in a session.
+KEEP_CACHED_GRANULES = 1
+
+
+def _prune_granule_cache(keep_id: str) -> None:
+    rfl_files = [p for p in DATA_DIR.glob("*_RFL_*.nc") if _is_reflectance(p.name)]
+    others = sorted((p for p in rfl_files if keep_id not in p.name),
+                     key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in others[max(0, KEEP_CACHED_GRANULES - 1):]:
+        p.unlink(missing_ok=True)
+
+
 def download_granule(granule_id: str) -> Path:
+    _prune_granule_cache(granule_id)
     for p in sorted(DATA_DIR.glob(f"*{granule_id}*.nc")):
         if not _is_reflectance(p.name):
             continue
