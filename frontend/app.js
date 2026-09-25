@@ -370,12 +370,20 @@ document.getElementById('searchBtn').onclick = async () => {
     setStatus(err.message, true);
     return;
   }
+  pointLayer.clearLayers();
+  showScenes(scenes, `${scenes.length} scene(s) found (≤${cloudMax}% cloud)`);
+};
+
+// Replaces the scene list and footprints with `scenes`. Shared by the
+// map-view search and the lat/lon search; scenes from the latter carry a
+// `matches` list naming the query point(s) each one covers.
+function showScenes(scenes, statusMsg) {
   footprintLayer.clearLayers();
   footprintPolygons = {};
   scenesById = {};
   const list = document.getElementById('sceneList');
   list.innerHTML = '';
-  setStatus(`${scenes.length} scene(s) found (≤${cloudMax}% cloud)`);
+  setStatus(statusMsg);
   scenes.forEach(s => {
     scenesById[s.id] = s;
     footprintPolygons[s.id] = L.polygon(s.footprint, FOOTPRINT_STYLE).addTo(footprintLayer);
@@ -383,9 +391,203 @@ document.getElementById('searchBtn').onclick = async () => {
     div.className = 'scene-item';
     const cloud = s.cloud_cover == null ? '' : ` — ${Math.round(s.cloud_cover)}% cloud`;
     div.textContent = `${s.time.slice(0, 16)} — ${s.id}${cloud}`;
+    if (s.matches) {
+      const m = document.createElement('span');
+      m.className = 'scene-match';
+      m.textContent = ` — ${describeMatches(s.matches)}`;
+      div.appendChild(m);
+    }
     div.onclick = () => selectScene(s, div);
     list.appendChild(div);
   });
+}
+
+/* ---------- search by lat / lon / date ---------- */
+
+// Each query point is one /api/search call, so cap how many a single click
+// can fire, and run only a few at a time so CMR never sees a burst.
+const MAX_POINTS = 50;
+const SEARCH_CONCURRENCY = 4;
+// A scene "covers" a point if its footprint intersects this small box
+// (degrees, ~50 m) -- the search API takes a box, not a point.
+const POINT_HALF_BOX = 0.0005;
+
+const psLat = document.getElementById('psLat');
+const psLon = document.getElementById('psLon');
+const psDate = document.getElementById('psDate');
+const psRange = document.getElementById('psRange');
+const psSearchBtn = document.getElementById('psSearchBtn');
+const psCsv = document.getElementById('psCsv');
+const psInputs = [psLat, psLon, psDate, psRange];
+// Query points from the last lat/lon search, drawn on the map.
+const pointLayer = L.layerGroup().addTo(map);
+
+function splitList(text) {
+  return text.split(',').map(v => v.trim()).filter(v => v !== '');
+}
+
+// The button only works once all four criteria have something in them.
+function updatePsButton() {
+  psSearchBtn.disabled = !psInputs.every(i => i.value.trim() !== '');
+}
+psInputs.forEach(i => i.addEventListener('input', updatePsButton));
+updatePsButton();
+
+function isIsoDate(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(s + 'T00:00:00Z');
+  return !isNaN(d) && d.toISOString().slice(0, 10) === s;   // rejects 2025-02-30
+}
+
+// Turns the four boxes into query rows, or throws an Error saying what's wrong.
+// Lists pair up by position; a single value is reused for every row.
+function parseCriteria() {
+  const lats = splitList(psLat.value), lons = splitList(psLon.value);
+  const dates = splitList(psDate.value), ranges = splitList(psRange.value);
+  if (!lats.length || !lons.length || !dates.length || !ranges.length) {
+    throw new Error('Enter a lat, lon, date and range.');
+  }
+  if (ranges.length !== 1 || !/^\d+$/.test(ranges[0])) {
+    throw new Error('Range takes a single whole number of days (e.g. 60).');
+  }
+  const n = Math.max(lats.length, lons.length, dates.length);
+  const bad = [['lat', lats], ['lon', lons], ['date', dates]]
+    .filter(([, v]) => v.length !== 1 && v.length !== n);
+  if (bad.length) {
+    throw new Error(`Counts don't match (${lats.length} lat, ${lons.length} lon, ${dates.length} date). `
+      + 'Give each the same number of values, or a single value to use for every row.');
+  }
+  if (n > MAX_POINTS) throw new Error(`Up to ${MAX_POINTS} points per search (got ${n}).`);
+
+  const pick = (v, i) => v.length === 1 ? v[0] : v[i];
+  const rows = [];
+  for (let i = 0; i < n; i++) {
+    const lat = Number(pick(lats, i)), lon = Number(pick(lons, i)), date = pick(dates, i);
+    const where = n > 1 ? ` (row ${i + 1})` : '';
+    if (!isFinite(lat) || lat < -90 || lat > 90) throw new Error(`Invalid lat "${pick(lats, i)}"${where}: must be -90 to 90.`);
+    if (!isFinite(lon) || lon < -180 || lon > 180) throw new Error(`Invalid lon "${pick(lons, i)}"${where}: must be -180 to 180.`);
+    if (!isIsoDate(date)) throw new Error(`Invalid date "${date}"${where}: use YYYY-MM-DD.`);
+    rows.push({ n: i + 1, lat, lon, date });
+  }
+  return { rows, range: Number(ranges[0]) };
+}
+
+function shiftDate(iso, days) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function describeMatches(matches) {
+  if (matches.length === 1) {
+    const p = matches[0];
+    return `matches pt ${p.n} (${p.lat}, ${p.lon}; ${p.date})`;
+  }
+  return `matches pts ${matches.map(p => p.n).join(', ')}`;
+}
+
+// Runs fn over items with at most `limit` calls in flight; results in order.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i]); }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+psSearchBtn.onclick = async () => {
+  let criteria;
+  try {
+    criteria = parseCriteria();
+  } catch (err) {
+    setStatus(err.message, true);
+    return;
+  }
+  const { rows, range } = criteria;
+  const cloudMax = cloudCoverSlider.value;
+  setStatus(`Searching ${rows.length} point(s), ±${range} days…`);
+  psSearchBtn.disabled = true;
+
+  let failed = 0;
+  const results = await mapLimit(rows, SEARCH_CONCURRENCY, async (p) => {
+    try {
+      const { scenes } = await getJSON(
+        `/api/search?west=${p.lon - POINT_HALF_BOX}&south=${p.lat - POINT_HALF_BOX}`
+        + `&east=${p.lon + POINT_HALF_BOX}&north=${p.lat + POINT_HALF_BOX}`
+        + `&date_start=${shiftDate(p.date, -range)}T00:00:00Z`
+        + `&date_end=${shiftDate(p.date, range)}T23:59:59Z`
+        + `&cloud_cover_max=${cloudMax}`);
+      return scenes;
+    } catch (err) {
+      failed++;
+      return [];
+    }
+  });
+  updatePsButton();
+
+  // One scene can cover several points: list it once, naming every point.
+  const merged = new Map();
+  results.forEach((scenes, i) => scenes.forEach(s => {
+    if (!merged.has(s.id)) merged.set(s.id, { ...s, matches: [] });
+    merged.get(s.id).matches.push(rows[i]);
+  }));
+  const scenes = [...merged.values()].sort((a, b) => b.time.localeCompare(a.time));
+
+  pointLayer.clearLayers();
+  rows.forEach(p => L.circleMarker([p.lat, p.lon],
+    { radius: 6, color: '#8a5a00', weight: 2, fillColor: '#ffb000', fillOpacity: 0.9 })
+    .bindTooltip(`pt ${p.n}: ${p.lat}, ${p.lon}; ${p.date}`)
+    .addTo(pointLayer));
+  map.fitBounds(L.latLngBounds(rows.map(p => [p.lat, p.lon])).pad(0.3), { maxZoom: 9 });
+
+  showScenes(scenes, `${scenes.length} scene(s) found for ${rows.length} point(s), ±${range} days (≤${cloudMax}% cloud)`
+    + (failed ? ` — ${failed} point search(es) failed, try again` : ''));
+  if (failed) setStatus(statusTextEl.textContent, true);
+};
+
+/* ---------- CSV import (fills the boxes; searching is still a click) ---------- */
+
+function csvCells(line, delim) {
+  return line.split(delim).map(c => c.trim().replace(/^"(.*)"$/, '$1').trim());
+}
+
+function loadCriteriaCsv(text) {
+  const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim() !== '');
+  if (lines.length < 2) throw new Error('The CSV needs a header row and at least one data row.');
+  const delim = lines[0].includes(',') ? ',' : (lines[0].includes('\t') ? '\t' : ';');
+  const header = csvCells(lines[0], delim).map(h => h.toLowerCase());
+  const col = names => header.findIndex(h => names.includes(h));
+  const iLat = col(['lat', 'latitude']), iLon = col(['lon', 'long', 'lng', 'longitude']);
+  const iDate = col(['date']), iRange = col(['range']);
+  const missing = [['lat', iLat], ['lon', iLon], ['date', iDate]].filter(([, i]) => i < 0).map(([n]) => n);
+  if (missing.length) throw new Error(`CSV is missing a column named: ${missing.join(', ')}.`);
+
+  const rows = lines.slice(1).map(l => csvCells(l, delim));
+  if (rows.length > MAX_POINTS) throw new Error(`The CSV has ${rows.length} rows; up to ${MAX_POINTS} per search.`);
+  const blank = rows.findIndex(r => !r[iLat] || !r[iLon] || !r[iDate]);
+  if (blank >= 0) throw new Error(`CSV line ${blank + 2} is missing its lat, lon or date.`);
+  psLat.value = rows.map(r => r[iLat] || '').join(', ');
+  psLon.value = rows.map(r => r[iLon] || '').join(', ');
+  psDate.value = rows.map(r => r[iDate] || '').join(', ');
+  // One range for the whole search: the first row's value, if the column exists.
+  if (iRange >= 0 && rows[0][iRange]) psRange.value = rows[0][iRange];
+  updatePsButton();
+  return rows.length;
+}
+
+document.getElementById('psCsvBtn').onclick = () => psCsv.click();
+psCsv.onchange = async () => {
+  const file = psCsv.files[0];
+  psCsv.value = '';   // so choosing the same file again still fires
+  if (!file) return;
+  try {
+    const n = loadCriteriaCsv(await file.text());
+    setStatus(`Loaded ${n} row(s) from ${file.name} — click "Search scenes by lat/lon"`);
+  } catch (err) {
+    setStatus(err.message, true);
+  }
 };
 
 // Selecting a scene shows NASA's pre-rendered quicklook immediately (no

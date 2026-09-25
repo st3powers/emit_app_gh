@@ -65,6 +65,13 @@ credentials are being picked up.
 ## Using it
 
 1. Pan/zoom to an area of interest and click **Search EMIT scenes in view**.
+   *Or* fill in **lat**, **lon**, **date** (`YYYY-MM-DD`) and **range**
+   (± days) and click **Search scenes by lat/lon** to find scenes covering
+   those points within that window. Lat, lon and date take comma-separated
+   lists that pair up in order (a single value applies to every row); range
+   is one value. **Upload .csv** fills the boxes from a file with a header
+   row of `lat`, `lon`, `date` (and optionally `range`, taken from the first
+   row). Up to 50 points per search; the cloud-cover filter still applies.
 2. Click a scene in the list. NASA's quicklook appears in the panel at once,
    and a few seconds later on the map as a preview: the server warps that
    raw-swath PNG onto the map grid with the granule's GLT, read remotely

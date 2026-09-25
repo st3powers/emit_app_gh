@@ -17,6 +17,14 @@
     #statusSpinner { flex:none; width:11px; height:11px; border:2px solid #ccd; border-top-color:#3388ff; border-radius:50%; animation:spin 0.8s linear infinite; }
     #status.error #statusSpinner { border-top-color:#b00020; }
     @keyframes spin { to { transform:rotate(360deg); } }
+    #pointSearch { font-size:12px; color:#555; margin:6px 0 2px; padding:6px; border:1px solid #eee; border-radius:4px; }
+    #pointSearch .ps-label { margin-bottom:4px; }
+    #pointSearch .ps-grid { display:grid; grid-template-columns:1fr 1fr; gap:4px 8px; }
+    #pointSearch .ps-grid label { display:flex; flex-direction:column; gap:2px; }
+    #pointSearch .ps-grid input { width:100%; box-sizing:border-box; font-size:12px; padding:2px 4px; }
+    #pointSearch .ps-actions { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+    #pointSearch .ps-hint { color:#888; font-size:11px; margin-top:4px; }
+    .scene-match { color:#8a5a00; font-weight:400; }
     #cloudCtl { font-size:12px; color:#555; padding:6px 2px 4px; }
     #cloudCtl input { vertical-align:middle; width:140px; }
     /* :not([hidden]) so the `hidden` attribute -- overridden by a plain
@@ -49,6 +57,22 @@
   <div id="map"></div>
   <div id="panel">
     <button id="searchBtn">Search EMIT scenes in view</button>
+    <div id="pointSearch">
+      <div class="ps-label">or provide criteria:</div>
+      <div class="ps-grid">
+        <label>lat <input id="psLat" type="text" value="42.8922"></label>
+        <label>lon <input id="psLon" type="text" value="-112.7702"></label>
+        <label>date <input id="psDate" type="text" value="2025-07-04" placeholder="YYYY-MM-DD"></label>
+        <label>range (&plusmn; days) <input id="psRange" type="text" value="60"></label>
+      </div>
+      <div class="ps-actions">
+        <button id="psCsvBtn" type="button" title="CSV with a header row: lat, lon, date (and optionally range)">Upload .csv</button>
+        <input id="psCsv" type="file" accept=".csv,text/csv" hidden>
+        <button id="psSearchBtn" type="button">Search scenes by lat/lon</button>
+      </div>
+      <div class="ps-hint">Comma-separate several values. Entries pair up in order
+        (1st lat + 1st lon + 1st date, &hellip;); a single value applies to every row.</div>
+    </div>
     <div id="cloudCtl">
       Max cloud cover <input type="range" id="cloudCover" min="0" max="100" value="25">
       <span id="cloudCoverVal">25%</span>
