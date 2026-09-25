@@ -1,4 +1,5 @@
 # backend/emit_utils.py
+import io
 import json
 import shutil
 from collections import OrderedDict
@@ -7,6 +8,7 @@ import numpy as np
 import netCDF4 as nc
 import h5py
 import earthaccess
+import requests
 from PIL import Image
 from pathlib import Path
 
@@ -199,13 +201,16 @@ def make_rgb_overlay(nc_path: Path, granule_id: str):
 
         png_path = OVERLAY_DIR / f"{granule_id}.png"
         Image.fromarray(out).save(png_path)
-
-        ulx, xres, _, uly, _, yres = gt
-        rows, cols = glt_x.shape
-        bounds = [[uly + rows * yres, ulx], [uly, ulx + cols * xres]]  # [[S, W], [N, E]]
-        return png_path, bounds
+        return png_path, _glt_bounds(gt, glt_x.shape)
     finally:
         ds.close()
+
+
+def _glt_bounds(gt, shape):
+    """Leaflet [[S, W], [N, E]] of the GLT's lat/lon grid."""
+    ulx, xres, _, uly, _, yres = gt
+    rows, cols = shape
+    return [[uly + rows * yres, ulx], [uly, ulx + cols * xres]]
 
 
 def _bounds_path(granule_id: str) -> Path:
@@ -268,15 +273,47 @@ _remote_handles: "OrderedDict[str, h5py.File]" = OrderedDict()
 _remote_wavelengths: dict = {}
 
 
+# CMR records by granule id, so the map preview (which needs the browse URL)
+# and the remote handle below share one search instead of each doing their own.
+_CMR_CACHE_MAX = 64
+_cmr_records: "OrderedDict[str, object]" = OrderedDict()
+
+
+def _find_granule(granule_id: str):
+    if granule_id in _cmr_records:
+        _cmr_records.move_to_end(granule_id)
+        return _cmr_records[granule_id]
+    results = earthaccess.search_data(short_name="EMITL2ARFL", granule_ur=granule_id)
+    if not results:
+        raise FileNotFoundError(f"CMR has no EMITL2ARFL granule {granule_id}")
+    if len(_cmr_records) >= _CMR_CACHE_MAX:
+        _cmr_records.popitem(last=False)
+    _cmr_records[granule_id] = results[0]
+    return results[0]
+
+
+def browse_url(umm):
+    """Public quicklook PNG for a granule, or None if CMR has none.
+
+    This is CMR's pre-rendered "GET RELATED VISUALIZATION" link -- the raw
+    (non-orthorectified) swath as a browser-fetchable PNG, a few MB, no
+    Earthdata login required. It lets the UI show *something* the instant a
+    scene is picked, instead of waiting on the multi-GB granule download
+    that /api/load needs for a real georeferenced overlay.
+    """
+    for link in umm.get("RelatedUrls", []):
+        url = link.get("URL", "")
+        if link.get("Type") == "GET RELATED VISUALIZATION" and url.startswith("https://"):
+            return url
+    return None
+
+
 def _open_remote(granule_id: str) -> h5py.File:
     if granule_id in _remote_handles:
         _remote_handles.move_to_end(granule_id)
         return _remote_handles[granule_id]
 
-    results = earthaccess.search_data(short_name="EMITL2ARFL", granule_ur=granule_id)
-    if not results:
-        raise FileNotFoundError(f"CMR has no EMITL2ARFL granule {granule_id}")
-    files = earthaccess.open(results)
+    files = earthaccess.open([_find_granule(granule_id)])
     rfl = [f for f in files if _is_reflectance(Path(f.path).name)]
     if not rfl:
         raise FileNotFoundError(f"No _RFL_ file to stream for {granule_id}")
@@ -319,3 +356,59 @@ def extract_spectrum_remote(granule_id: str, lat: float, lon: float):
 
     spectrum[spectrum <= -0.005] = np.nan
     return wl.tolist(), [None if np.isnan(v) else round(float(v), 5) for v in spectrum]
+
+
+def _preview_paths(granule_id: str):
+    return (OVERLAY_DIR / f"{granule_id}.preview.png",
+            OVERLAY_DIR / f"{granule_id}.preview.bounds.json")
+
+
+def make_preview_overlay(granule_id: str):
+    """Map-aligned quicklook for a scene, without downloading the granule.
+
+    CMR's browse PNG is the raw swath, pixel for pixel (1242 x 1280, the same
+    shape as `reflectance`), so the granule's own GLT places it on the ortho
+    grid exactly as make_rgb_overlay places the real reflectance -- only the
+    colours differ. The GLT is read over the same remote handle the streamed
+    spectra use, so this costs the ~1.4 MB PNG plus the GLT's compressed
+    chunks: measured ~6-8 s end to end, versus minutes for the full download.
+    """
+    url = browse_url(_find_granule(granule_id)["umm"])
+    if url is None:
+        raise FileNotFoundError(f"CMR lists no quicklook for {granule_id}")
+    resp = requests.get(url, timeout=60)
+    resp.raise_for_status()
+    quick = np.asarray(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+
+    ds = _open_remote(granule_id)
+    glt_x = ds["location"]["glt_x"][:]
+    glt_y = ds["location"]["glt_y"][:]
+    swath_rows, swath_cols = ds["reflectance"].shape[:2]
+    gt = ds.attrs["geotransform"]
+
+    valid = (glt_x > 0) & (glt_y > 0)
+    # Scaled in case a browse image ever isn't swath-sized; so far it always is.
+    rows = np.minimum(((glt_y[valid] - 1) * quick.shape[0] / swath_rows).astype(np.intp),
+                      quick.shape[0] - 1)
+    cols = np.minimum(((glt_x[valid] - 1) * quick.shape[1] / swath_cols).astype(np.intp),
+                      quick.shape[1] - 1)
+    rgb = quick[rows, cols]
+    out = np.zeros((*glt_x.shape, 4), dtype=np.uint8)
+    out[valid, :3] = rgb
+    # Pure black in the browse image is its no-data (the dropped-scan-line
+    # stripes some granules carry), not dark ground -- leave it see-through.
+    out[valid, 3] = np.where(rgb.any(axis=1), 255, 0)
+
+    png_path, _ = _preview_paths(granule_id)
+    Image.fromarray(out).save(png_path)
+    return png_path, _glt_bounds(gt, glt_x.shape)
+
+
+def get_or_make_preview_overlay(granule_id: str):
+    """Cached wrapper around make_preview_overlay (PNG + bounds sidecar)."""
+    png_path, bounds_path = _preview_paths(granule_id)
+    if png_path.exists() and bounds_path.exists():
+        return png_path, json.loads(bounds_path.read_text())
+    png_path, bounds = make_preview_overlay(granule_id)
+    bounds_path.write_text(json.dumps(bounds))
+    return png_path, bounds

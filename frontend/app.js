@@ -381,11 +381,10 @@ document.getElementById('searchBtn').onclick = async () => {
 };
 
 // Selecting a scene shows NASA's pre-rendered quicklook immediately (no
-// download) instead of the true georeferenced overlay, which needs the full
-// granule. The quicklook's rotation varies scene to scene (raw swath, not
-// orthorectified), so draping it on the map with an axis-aligned bounding
-// box would misrepresent it -- it's shown as a plain panel thumbnail instead,
-// just to see roughly what's there before committing to a multi-GB fetch.
+// download) in the panel, and a few seconds later on the map too: the server
+// warps that raw-swath PNG through the granule's GLT (read remotely, see
+// /api/preview), so it lands exactly where the real overlay will. Neither
+// needs the multi-GB granule, which still waits for a click on the map.
 function selectScene(scene, el) {
   if (activeSceneEl) activeSceneEl.classList.remove('scene-item-active');
   el.classList.add('scene-item-active');
@@ -412,10 +411,40 @@ function selectScene(scene, el) {
     browseImg.src = scene.browse_url;
     browseCtl.hidden = false;
     resetBrowseZoom();
-    setStatus('Quicklook shown in panel — click the map for a full-resolution spectrum');
+    setStatus('Quicklook shown in panel, placing it on the map… — click the map for a full-resolution spectrum');
+    loadPreview(scene);
   } else {
     browseCtl.hidden = true;
     setStatus('No quicklook available for this scene — click the map to fetch full-resolution data');
+  }
+}
+
+async function loadPreview(scene) {
+  let res;
+  try {
+    res = await getJSON(`/api/preview/${scene.id}`);
+  } catch (err) {
+    // Only a preview: the panel quicklook is still there, so don't raise an
+    // error over whatever the user is doing now -- just note it if nothing
+    // newer has replaced the "placing it on the map" message.
+    if (previewScene === scene && statusTextEl.textContent.includes('placing it on the map')) {
+      setStatus('Quicklook shown in panel (map preview unavailable) — click the map for a full-resolution spectrum');
+    }
+    return;
+  }
+  // Stale if the user has picked another scene, or the full-resolution
+  // overlay (which clears previewScene) got there first.
+  if (previewScene !== scene || overlay) return;
+
+  overlay = L.imageOverlay(res.overlay_url, res.bounds,
+    { opacity: Number(opacitySlider.value) / 100, pane: 'rasterPane' });
+  overlay.addTo(map);
+  overlayToggle.checked = true;
+  overlayCtl.hidden = false;
+  opacityCtl.hidden = false;
+  downloadMapPngBtn.hidden = false;
+  if (statusTextEl.textContent.includes('placing it on the map')) {
+    setStatus('Quicklook placed on the map (preview colours) — click the map for a full-resolution spectrum');
   }
 }
 

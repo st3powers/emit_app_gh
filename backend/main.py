@@ -90,22 +90,6 @@ def _bbox(footprint):
     return [[min(lats), min(lons)], [max(lats), max(lons)]]
 
 
-def _browse_url(umm):
-    """Public quicklook PNG for a granule, or None if CMR has none.
-
-    This is CMR's pre-rendered "GET RELATED VISUALIZATION" link -- the raw
-    (non-orthorectified) swath as a browser-fetchable PNG, a few MB, no
-    Earthdata login required. It lets the UI show *something* the instant a
-    scene is picked, instead of waiting on the multi-GB granule download
-    that /api/load needs for a real georeferenced overlay.
-    """
-    for link in umm.get("RelatedUrls", []):
-        url = link.get("URL", "")
-        if link.get("Type") == "GET RELATED VISUALIZATION" and url.startswith("https://"):
-            return url
-    return None
-
-
 @app.get("/api/health")
 def health():
     """Confirm the server is up, and report whether Earthdata auth works."""
@@ -149,7 +133,7 @@ def search_scenes(west: float, south: float, east: float, north: float,
                 "id": umm["GranuleUR"],
                 "time": umm["TemporalExtent"]["RangeDateTime"]["BeginningDateTime"],
                 "footprint": footprint,
-                "browse_url": _browse_url(umm),
+                "browse_url": emit_utils.browse_url(umm),
                 "browse_bounds": _bbox(footprint),
                 "cloud_cover": umm.get("CloudCover"),
             })
@@ -175,6 +159,27 @@ def load_scene(granule_id: str):
     except (KeyError, OSError) as exc:
         raise HTTPException(status_code=500,
                             detail=f"Could not build overlay: {exc}")
+    return {"overlay_url": f"/overlays/{png_path.name}", "bounds": bounds}
+
+
+@app.get("/api/preview/{granule_id}")
+def preview_scene(granule_id: str):
+    """The scene's quicklook, orthorectified onto the map -- no granule download.
+
+    CMR's browse PNG is the raw swath; this warps it through the granule's GLT
+    (read remotely) so it can sit on the map as a preview until /api/load's
+    real overlay replaces it. Seconds rather than minutes; cached after that.
+    """
+    ensure_login()
+    try:
+        png_path, bounds = emit_utils.get_or_make_preview_overlay(granule_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (KeyError, OSError) as exc:
+        # OSError covers network failures (requests' errors subclass it) and
+        # an undecodable PNG as well as remote HDF5 read errors.
+        raise HTTPException(status_code=502,
+                            detail=f"Could not build map preview: {exc}")
     return {"overlay_url": f"/overlays/{png_path.name}", "bounds": bounds}
 
 

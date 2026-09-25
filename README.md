@@ -65,8 +65,13 @@ credentials are being picked up.
 ## Using it
 
 1. Pan/zoom to an area of interest and click **Search EMIT scenes in view**.
-2. Click a scene in the list to download and display it.
-3. Click anywhere inside the loaded overlay to plot that pixel's spectrum.
+2. Click a scene in the list. NASA's quicklook appears in the panel at once,
+   and a few seconds later on the map as a preview: the server warps that
+   raw-swath PNG onto the map grid with the granule's GLT, read remotely
+   (`/api/preview`), so no granule is downloaded yet.
+3. Click the map inside the scene to plot that pixel's spectrum. This first
+   click starts the full granule download in the background; its true
+   reflectance overlay then replaces the preview.
 
 ## Notes
 
