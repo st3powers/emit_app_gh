@@ -41,6 +41,9 @@
     /* Leaflet control in the map's own bottom-right corner. */
     .map-png-ctl button { cursor:pointer; padding:5px 8px; font:12px sans-serif; background:#fff; border:2px solid rgba(0,0,0,0.2); border-radius:4px; }
     .map-png-ctl button:disabled { cursor:default; color:#888; }
+    /* Leaflet's own .leaflet-bar a rules size links as 26px icon buttons. */
+    .leaflet-bar.map-png-ctl a { display:block; width:auto; height:auto; line-height:normal; margin-bottom:4px; padding:5px 8px; font:12px sans-serif; background:#fff; color:#0645ad; border:2px solid rgba(0,0,0,0.2); border-radius:4px; text-decoration:underline; }
+    .leaflet-bar.map-png-ctl a[hidden] { display:none; }
   </style>
 </head><body>
   <div id="map"></div>

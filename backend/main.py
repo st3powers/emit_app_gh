@@ -134,6 +134,7 @@ def search_scenes(west: float, south: float, east: float, north: float,
                 "time": umm["TemporalExtent"]["RangeDateTime"]["BeginningDateTime"],
                 "footprint": footprint,
                 "browse_url": emit_utils.browse_url(umm),
+                "rfl_url": emit_utils.rfl_download_url(umm),
                 "browse_bounds": _bbox(footprint),
                 "cloud_cover": umm.get("CloudCover"),
             })

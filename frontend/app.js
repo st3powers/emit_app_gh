@@ -24,7 +24,14 @@ map.getPane('rasterPane').style.zIndex = 450; // default overlayPane is 400
 const mapPngCtl = L.control({ position: 'bottomright' });
 mapPngCtl.onAdd = function () {
   const div = L.DomUtil.create('div', 'leaflet-bar map-png-ctl');
-  div.innerHTML = '<button id="downloadMapPngBtn" type="button" hidden>Download map PNG</button>';
+  div.innerHTML =
+    // A plain link to NASA, opened in a new tab: Earthdata Login asks the
+    // user to sign in with their own (free) account, then the download
+    // comes straight from LP DAAC -- nothing multi-GB passes through here.
+    '<a id="sourceDownloadLink" target="_blank" rel="noopener" hidden'
+    + ' title="Full reflectance granule (~1.8 GB+). Opens NASA Earthdata sign-in first.">'
+    + 'Download .nc from NASA</a>'
+    + '<button id="downloadMapPngBtn" type="button" hidden>Download map PNG</button>';
   // Otherwise a click here also reaches the map's own click handler
   // underneath, which would fire an unwanted spectrum lookup.
   L.DomEvent.disableClickPropagation(div);
@@ -32,6 +39,7 @@ mapPngCtl.onAdd = function () {
 };
 mapPngCtl.addTo(map);
 const downloadMapPngBtn = document.getElementById('downloadMapPngBtn');
+const sourceDownloadLink = document.getElementById('sourceDownloadLink');
 const mapPngCtlContainer = mapPngCtl.getContainer();
 
 downloadMapPngBtn.onclick = async () => {
@@ -404,6 +412,8 @@ function selectScene(scene, el) {
   downloadMapPngBtn.hidden = true;
   // Thicker orange outline so it's clear which box on the map this scene is.
   setFootprintSelected(scene.id);
+  sourceDownloadLink.hidden = !scene.rfl_url;
+  if (scene.rfl_url) sourceDownloadLink.href = scene.rfl_url;
 
   map.fitBounds(scene.browse_bounds);
 

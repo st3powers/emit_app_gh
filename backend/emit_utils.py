@@ -308,6 +308,21 @@ def browse_url(umm):
     return None
 
 
+def rfl_download_url(umm):
+    """HTTPS link to the granule's _RFL_ .nc at LP DAAC, or None.
+
+    Meant for the user's browser, not this server: opening it redirects to
+    Earthdata Login, so the file comes straight from NASA under the user's own
+    account -- nothing multi-GB is served through (or billed to) this app.
+    """
+    for link in umm.get("RelatedUrls", []):
+        url = link.get("URL", "")
+        if (link.get("Type") == "GET DATA" and url.startswith("https://")
+                and _is_reflectance(url.rsplit("/", 1)[-1])):
+            return url
+    return None
+
+
 def _open_remote(granule_id: str) -> h5py.File:
     if granule_id in _remote_handles:
         _remote_handles.move_to_end(granule_id)
