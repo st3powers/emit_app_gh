@@ -71,7 +71,12 @@ credentials are being picked up.
    lists that pair up in order (a single value applies to every row); range
    is one value. **Upload .csv** fills the boxes from a file with a header
    row of `lat`, `lon`, `date` (and optionally `range`, taken from the first
-   row). Up to 50 points per search; the cloud-cover filter still applies.
+   row). Up to 1,500 rows per search; the cloud-cover filter still applies.
+   Rows are grouped by location and their date windows merged (up to a year
+   apart), so a big CSV costs about one NASA query per site rather than one
+   per row — e.g. 1,223 rows at 40 sites is 40 queries, a few seconds. Queries
+   run 3 at a time and retry with backoff if CMR throttles; the button turns
+   into **Stop search** while running.
 2. Click a scene in the list. NASA's quicklook appears in the panel at once,
    and a few seconds later on the map as a preview: the server warps that
    raw-swath PNG onto the map grid with the granule's GLT, read remotely

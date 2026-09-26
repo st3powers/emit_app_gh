@@ -404,13 +404,22 @@ function showScenes(scenes, statusMsg) {
 
 /* ---------- search by lat / lon / date ---------- */
 
-// Each query point is one /api/search call, so cap how many a single click
-// can fire, and run only a few at a time so CMR never sees a burst.
-const MAX_POINTS = 50;
-const SEARCH_CONCURRENCY = 4;
+// Rows are grouped by location and their date windows merged, so a big CSV
+// costs one CMR query per location-window rather than one per row (see
+// planQueries). Those still run only a few at a time, with retries that back
+// off, so CMR never sees a flood.
+const MAX_POINTS = 1500;
+const SEARCH_CONCURRENCY = 3;
+const RETRY_WAITS_MS = [2000, 5000, 15000];
+// Scenes asked for per query. A merged window can span years at one site;
+// hitting this cap means some scenes may be missing, which is reported.
+const QUERY_SCENE_CAP = 1000;
+// Date windows at one location this close together share a query (planQueries).
+const MERGE_GAP_DAYS = 365;
 // A scene "covers" a point if its footprint intersects this small box
 // (degrees, ~50 m) -- the search API takes a box, not a point.
 const POINT_HALF_BOX = 0.0005;
+const DAY_MS = 86400000;
 
 const psLat = document.getElementById('psLat');
 const psLon = document.getElementById('psLon');
@@ -419,15 +428,21 @@ const psRange = document.getElementById('psRange');
 const psSearchBtn = document.getElementById('psSearchBtn');
 const psCsv = document.getElementById('psCsv');
 const psInputs = [psLat, psLon, psDate, psRange];
-// Query points from the last lat/lon search, drawn on the map.
+// Query points from the last lat/lon search, drawn on the map. Canvas rather
+// than one SVG element per marker, so ~1500 of them stay responsive.
 const pointLayer = L.layerGroup().addTo(map);
+const pointRenderer = L.canvas();
+// Set while a lat/lon search is running; the button then reads "Stop search".
+let psRun = null;
 
 function splitList(text) {
   return text.split(',').map(v => v.trim()).filter(v => v !== '');
 }
 
-// The button only works once all four criteria have something in them.
+// The button only works once all four criteria have something in them
+// (or, mid-search, as the stop button).
 function updatePsButton() {
+  if (psRun) return;
   psSearchBtn.disabled = !psInputs.every(i => i.value.trim() !== '');
 }
 psInputs.forEach(i => i.addEventListener('input', updatePsButton));
@@ -472,32 +487,85 @@ function parseCriteria() {
   return { rows, range: Number(ranges[0]) };
 }
 
-function shiftDate(iso, days) {
-  const d = new Date(iso + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
+const dayOf = iso => Math.floor(Date.parse(iso) / DAY_MS);          // UTC day number
+const isoDay = day => new Date(day * DAY_MS).toISOString().slice(0, 10);
 
 function describeMatches(matches) {
   if (matches.length === 1) {
     const p = matches[0];
     return `matches pt ${p.n} (${p.lat}, ${p.lon}; ${p.date})`;
   }
-  return `matches pts ${matches.map(p => p.n).join(', ')}`;
+  const shown = matches.slice(0, 10).map(p => p.n).join(', ');
+  return `matches pts ${shown}` + (matches.length > 10 ? ` … (+${matches.length - 10} more)` : '');
+}
+
+// One CMR query per location per merged date window, instead of one per row.
+// Rows at the same lat/lon are grouped; their ±range windows are sorted and
+// merged unless separated by more than MERGE_GAP_DAYS, so e.g. 1,200 rows at
+// 40 sites become ~40 queries. Merging across gaps asks CMR for some scenes
+// no row wants, but those are few and dropped when scenes are matched back
+// to individual rows -- far cheaper than hundreds of extra requests. (With
+// only overlapping windows merged, ±5 days over 1,223 rows at 40 sites
+// still meant 882 queries.)
+function planQueries(rows, range) {
+  const byLoc = new Map();
+  rows.forEach(r => {
+    const key = `${r.lat},${r.lon}`;
+    if (!byLoc.has(key)) byLoc.set(key, { lat: r.lat, lon: r.lon, rows: [] });
+    const d = dayOf(r.date + 'T00:00:00Z');
+    byLoc.get(key).rows.push({ ...r, start: d - range, end: d + range });
+  });
+  const queries = [];
+  byLoc.forEach(loc => {
+    const sorted = [...loc.rows].sort((a, b) => a.start - b.start);
+    let cur = null;
+    sorted.forEach(r => {
+      if (cur && r.start <= cur.end + 1 + MERGE_GAP_DAYS) {
+        cur.end = Math.max(cur.end, r.end);
+        cur.rows.push(r);
+      } else {
+        cur = { lat: loc.lat, lon: loc.lon, start: r.start, end: r.end, rows: [r] };
+        queries.push(cur);
+      }
+    });
+  });
+  return { queries, locations: [...byLoc.values()] };
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// getJSON with backoff: a failed query (e.g. CMR throttling, which the
+// backend reports as 503) waits and retries rather than being dropped.
+async function getJSONWithRetry(url, run) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await getJSON(url);
+    } catch (err) {
+      if (attempt >= RETRY_WAITS_MS.length || run.stopped) throw err;
+      await sleep(RETRY_WAITS_MS[attempt]);
+    }
+  }
 }
 
 // Runs fn over items with at most `limit` calls in flight; results in order.
-async function mapLimit(items, limit, fn) {
+// Stops handing out new items once run.stopped is set.
+async function mapLimit(items, limit, fn, run) {
   const out = new Array(items.length);
   let next = 0;
   const worker = async () => {
-    while (next < items.length) { const i = next++; out[i] = await fn(items[i]); }
+    while (next < items.length && !run.stopped) { const i = next++; out[i] = await fn(items[i]); }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return out;
 }
 
 psSearchBtn.onclick = async () => {
+  if (psRun) {                       // mid-search: this click means "stop"
+    psRun.stopped = true;
+    psSearchBtn.disabled = true;
+    psSearchBtn.textContent = 'Stopping…';
+    return;
+  }
   let criteria;
   try {
     criteria = parseCriteria();
@@ -507,44 +575,81 @@ psSearchBtn.onclick = async () => {
   }
   const { rows, range } = criteria;
   const cloudMax = cloudCoverSlider.value;
-  setStatus(`Searching ${rows.length} point(s), ±${range} days…`);
-  psSearchBtn.disabled = true;
+  const { queries, locations } = planQueries(rows, range);
 
-  let failed = 0;
-  const results = await mapLimit(rows, SEARCH_CONCURRENCY, async (p) => {
-    try {
-      const { scenes } = await getJSON(
-        `/api/search?west=${p.lon - POINT_HALF_BOX}&south=${p.lat - POINT_HALF_BOX}`
-        + `&east=${p.lon + POINT_HALF_BOX}&north=${p.lat + POINT_HALF_BOX}`
-        + `&date_start=${shiftDate(p.date, -range)}T00:00:00Z`
-        + `&date_end=${shiftDate(p.date, range)}T23:59:59Z`
-        + `&cloud_cover_max=${cloudMax}`);
-      return scenes;
-    } catch (err) {
-      failed++;
-      return [];
-    }
-  });
-  updatePsButton();
+  const run = psRun = { stopped: false };
+  const label = psSearchBtn.textContent;
+  psSearchBtn.textContent = 'Stop search';
+  let done = 0, failed = 0, capped = 0;
+  const progress = () => setStatus(`Searching… ${done} of ${queries.length} search(es) `
+    + `(${rows.length} row(s) at ${locations.length} location(s), ±${range} days)`);
+  progress();
 
-  // One scene can cover several points: list it once, naming every point.
+  let results;
+  try {
+    results = await mapLimit(queries, SEARCH_CONCURRENCY, async (q) => {
+      try {
+        const { scenes } = await getJSONWithRetry(
+          `/api/search?west=${q.lon - POINT_HALF_BOX}&south=${q.lat - POINT_HALF_BOX}`
+          + `&east=${q.lon + POINT_HALF_BOX}&north=${q.lat + POINT_HALF_BOX}`
+          + `&date_start=${isoDay(q.start)}T00:00:00Z&date_end=${isoDay(q.end)}T23:59:59Z`
+          + `&cloud_cover_max=${cloudMax}&count=${QUERY_SCENE_CAP}`, run);
+        if (scenes.length >= QUERY_SCENE_CAP) capped++;
+        return scenes;
+      } catch (err) {
+        failed++;
+        return [];
+      } finally {
+        done++;
+        if (!run.stopped) progress();
+      }
+    }, run);
+  } finally {
+    psRun = null;
+    psSearchBtn.textContent = label;
+    updatePsButton();
+  }
+
+  // Match each scene back to the rows whose own ±range window contains it
+  // (a merged query covers several rows' windows). One scene can match many
+  // rows, including rows at other locations: list it once, naming them all.
   const merged = new Map();
-  results.forEach((scenes, i) => scenes.forEach(s => {
-    if (!merged.has(s.id)) merged.set(s.id, { ...s, matches: [] });
-    merged.get(s.id).matches.push(rows[i]);
-  }));
+  results.forEach((scenes, qi) => {
+    if (!scenes) return;                          // skipped after "stop"
+    scenes.forEach(s => {
+      const day = dayOf(s.time);
+      queries[qi].rows.forEach(r => {
+        if (day < r.start || day > r.end) return;
+        if (!merged.has(s.id)) merged.set(s.id, { ...s, matches: [], seen: new Set() });
+        const m = merged.get(s.id);
+        if (!m.seen.has(r.n)) { m.seen.add(r.n); m.matches.push(r); }
+      });
+    });
+  });
   const scenes = [...merged.values()].sort((a, b) => b.time.localeCompare(a.time));
+  scenes.forEach(s => s.matches.sort((a, b) => a.n - b.n));
 
+  // One marker per location, listing its rows.
   pointLayer.clearLayers();
-  rows.forEach(p => L.circleMarker([p.lat, p.lon],
-    { radius: 6, color: '#8a5a00', weight: 2, fillColor: '#ffb000', fillOpacity: 0.9 })
-    .bindTooltip(`pt ${p.n}: ${p.lat}, ${p.lon}; ${p.date}`)
-    .addTo(pointLayer));
-  map.fitBounds(L.latLngBounds(rows.map(p => [p.lat, p.lon])).pad(0.3), { maxZoom: 9 });
+  locations.forEach(loc => {
+    const ns = loc.rows.map(r => r.n);
+    const which = ns.length === 1 ? `pt ${ns[0]}; ${loc.rows[0].date}`
+      : `pts ${ns.slice(0, 10).join(', ')}${ns.length > 10 ? ` … (+${ns.length - 10} more)` : ''}`;
+    L.circleMarker([loc.lat, loc.lon], { renderer: pointRenderer, radius: 6, color: '#8a5a00',
+      weight: 2, fillColor: '#ffb000', fillOpacity: 0.9 })
+      .bindTooltip(`${loc.lat}, ${loc.lon} — ${which}`)
+      .addTo(pointLayer);
+  });
+  map.fitBounds(L.latLngBounds(locations.map(l => [l.lat, l.lon])).pad(0.3), { maxZoom: 9 });
 
-  showScenes(scenes, `${scenes.length} scene(s) found for ${rows.length} point(s), ±${range} days (≤${cloudMax}% cloud)`
-    + (failed ? ` — ${failed} point search(es) failed, try again` : ''));
-  if (failed) setStatus(statusTextEl.textContent, true);
+  const notes = [];
+  if (run.stopped) notes.push(`stopped after ${done} of ${queries.length} searches`);
+  if (failed) notes.push(`${failed} search(es) failed after retries — try again`);
+  if (capped) notes.push(`${capped} location(s) hit the ${QUERY_SCENE_CAP}-scene cap; narrow the range to see all`);
+  showScenes(scenes, `${scenes.length} scene(s) found for ${rows.length} row(s) at `
+    + `${locations.length} location(s), ±${range} days (≤${cloudMax}% cloud; `
+    + `${queries.length} search(es))` + (notes.length ? ' — ' + notes.join('; ') : ''));
+  if (failed || capped) setStatus(statusTextEl.textContent, true);
 };
 
 /* ---------- CSV import (fills the boxes; searching is still a click) ---------- */

@@ -9,7 +9,7 @@ if str(BASE_DIR) not in sys.path:
 
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import earthaccess
@@ -107,20 +107,30 @@ def search_scenes(west: float, south: float, east: float, north: float,
                   # through "now", so new granules (2025, 2026, ...) show up
                   # without this default ever needing to be bumped.
                   date_start: str = "2022-01-01", date_end: Optional[str] = None,
-                  cloud_cover_max: float = 25):
+                  cloud_cover_max: float = 25,
+                  # The map-view search keeps the default. The lat/lon search
+                  # asks for more, because it merges a location's date windows
+                  # into one query that can span a long period.
+                  count: int = Query(50, ge=1, le=2000)):
     ensure_login()
-    results = earthaccess.search_data(
-        short_name="EMITL2ARFL",           # L2A surface reflectance
-        bounding_box=(west, south, east, north),
-        temporal=(date_start, date_end),
-        cloud_cover=(0, cloud_cover_max),
-        # Most-recent-first, so the count=50 cap keeps the newest scenes for
-        # AOIs with more matches than that -- otherwise it silently keeps
-        # only the *oldest* ones (CMR's default), which is why this used to
-        # look like results were "limited to 2023/2024".
-        sort_key="-start_date",
-        count=50,
-    )
+    try:
+        results = earthaccess.search_data(
+            short_name="EMITL2ARFL",           # L2A surface reflectance
+            bounding_box=(west, south, east, north),
+            temporal=(date_start, date_end),
+            cloud_cover=(0, cloud_cover_max),
+            # Most-recent-first, so the count cap keeps the newest scenes for
+            # AOIs with more matches than that -- otherwise it silently keeps
+            # only the *oldest* ones (CMR's default), which is why this used
+            # to look like results were "limited to 2023/2024".
+            sort_key="-start_date",
+            count=count,
+        )
+    except Exception as exc:
+        # CMR errors (including 429 throttling) surface from earthaccess as
+        # plain exceptions; report them as retryable rather than a bare 500.
+        raise HTTPException(status_code=503,
+                            detail=f"NASA CMR search failed, try again ({exc})")
     scenes = []
     for g in results:
         umm = g["umm"]
