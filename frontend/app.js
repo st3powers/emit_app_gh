@@ -90,21 +90,45 @@ const FOOTPRINT_STYLE = { color: '#3388ff', weight: 1, fillOpacity: 0.05 };
 const FOOTPRINT_SELECTED_STYLE = { color: '#e67e22', weight: 3, fillOpacity: 0.05 };
 const FOOTPRINT_LOADING_STYLE = { color: '#f1c40f', weight: 2, fillColor: '#f1c40f', fillOpacity: 0.35 };
 
+// Brighter and heavier than the loading style, so a hovered box stands out
+// even over one that is loading.
+const FOOTPRINT_HOVER_STYLE = { color: '#ffd400', weight: 4, fillColor: '#ffee58', fillOpacity: 0.35 };
+const loadingFootprintIds = new Set();
+// The footprint lit up by hovering its row in the scene list.
+let hoverFootprintId = null;
+
+// One place decides a footprint's look: hover > loading > selected > default.
+// Every state change goes through here, so ending one state (e.g. the mouse
+// leaving a row) restores whichever state is still in effect.
+function restyleFootprint(id) {
+  const poly = footprintPolygons[id];
+  if (!poly) return;
+  poly.setStyle(id === hoverFootprintId ? FOOTPRINT_HOVER_STYLE
+    : loadingFootprintIds.has(id) ? FOOTPRINT_LOADING_STYLE
+    : id === selectedFootprintId ? FOOTPRINT_SELECTED_STYLE
+    : FOOTPRINT_STYLE);
+}
+
 function setFootprintSelected(id) {
-  if (selectedFootprintId && footprintPolygons[selectedFootprintId]) {
-    footprintPolygons[selectedFootprintId].setStyle(FOOTPRINT_STYLE);
-  }
+  const prev = selectedFootprintId;
   selectedFootprintId = id;
-  if (footprintPolygons[id]) footprintPolygons[id].setStyle(FOOTPRINT_SELECTED_STYLE);
+  if (prev) restyleFootprint(prev);
+  restyleFootprint(id);
 }
 
 function setFootprintLoading(id, isLoading) {
-  const poly = footprintPolygons[id];
-  if (!poly) return;
-  // Loading always wins visually; once it's done, fall back to the
-  // "selected" outline if this is still the selected scene, else default.
-  poly.setStyle(isLoading ? FOOTPRINT_LOADING_STYLE
-    : (id === selectedFootprintId ? FOOTPRINT_SELECTED_STYLE : FOOTPRINT_STYLE));
+  if (isLoading) loadingFootprintIds.add(id); else loadingFootprintIds.delete(id);
+  restyleFootprint(id);
+}
+
+function setFootprintHover(id) {
+  const prev = hoverFootprintId;
+  hoverFootprintId = id;
+  if (prev) restyleFootprint(prev);
+  if (id && footprintPolygons[id]) {
+    restyleFootprint(id);
+    footprintPolygons[id].bringToFront();   // not hidden under overlapping scenes
+  }
 }
 
 // Scene id -> its full search-result record, so scene metadata (time, cloud
@@ -381,6 +405,11 @@ function showScenes(scenes, statusMsg) {
   footprintLayer.clearLayers();
   footprintPolygons = {};
   scenesById = {};
+  sceneRowEls = {};
+  hoverRowIds = [];
+  hoverFootprintId = null;
+  currentScenes = scenes;
+  scenesCsvBtn.hidden = scenes.length === 0;
   const list = document.getElementById('sceneList');
   list.innerHTML = '';
   setStatus(statusMsg);
@@ -398,9 +427,114 @@ function showScenes(scenes, statusMsg) {
       div.appendChild(m);
     }
     div.onclick = () => selectScene(s, div);
+    // Hovering a row lights up that scene's box on the map.
+    div.onmouseenter = () => setFootprintHover(s.id);
+    div.onmouseleave = () => { if (hoverFootprintId === s.id) setFootprintHover(null); };
+    sceneRowEls[s.id] = div;
     list.appendChild(div);
   });
 }
+
+/* ---------- scene list <-> map hover ---------- */
+
+// Scene id -> its row in the scene list, for highlighting from the map side.
+let sceneRowEls = {};
+// The scenes currently listed, in list order (also what the CSV exports).
+let currentScenes = [];
+// Rows currently lit up because the cursor is over their scene on the map.
+let hoverRowIds = [];
+
+// Ray-casting test against a scene footprint ([[lat, lon], ...] ring).
+function insideFootprint(latlng, ring) {
+  if (!ring || ring.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [yi, xi] = ring[i], [yj, xj] = ring[j];
+    if ((yi > latlng.lat) !== (yj > latlng.lat)
+        && latlng.lng < (xj - xi) * (latlng.lat - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// Hovering the map lights up the row of *every* listed scene whose footprint
+// contains the cursor. A point-in-polygon test rather than Leaflet's own
+// per-polygon mouseover, because scenes overlap and those events only fire
+// for the topmost box. Coalesced to one check per animation frame.
+let pendingHoverLatLng = null;
+map.on('mousemove', (e) => {
+  if (!pendingHoverLatLng) requestAnimationFrame(updateRowHover);
+  pendingHoverLatLng = e.latlng;
+});
+map.on('mouseout', () => { pendingHoverLatLng = null; setRowHover([]); });
+
+function updateRowHover() {
+  const ll = pendingHoverLatLng;
+  pendingHoverLatLng = null;
+  if (!ll) return;
+  setRowHover(currentScenes.filter(s => insideFootprint(ll, s.footprint)).map(s => s.id));
+}
+
+function setRowHover(ids) {
+  if (ids.length === hoverRowIds.length && ids.every((id, i) => id === hoverRowIds[i])) return;
+  hoverRowIds.forEach(id => { if (sceneRowEls[id]) sceneRowEls[id].classList.remove('scene-item-hover'); });
+  hoverRowIds = ids;
+  ids.forEach(id => { if (sceneRowEls[id]) sceneRowEls[id].classList.add('scene-item-hover'); });
+  if (ids.length && sceneRowEls[ids[0]]) scrollRowIntoList(sceneRowEls[ids[0]]);
+}
+
+// Scrolls just the scene list (not the whole panel) so `el` is visible.
+function scrollRowIntoList(el) {
+  const list = el.parentElement;
+  const lr = list.getBoundingClientRect(), er = el.getBoundingClientRect();
+  if (er.top < lr.top) list.scrollTop -= lr.top - er.top;
+  else if (er.bottom > lr.bottom) list.scrollTop += er.bottom - lr.bottom;
+}
+
+/* ---------- scene table CSV ---------- */
+
+const scenesCsvBtn = document.getElementById('scenesCsvBtn');
+
+// Scene outline as WKT (lon lat order, closed ring), for loading into a GIS.
+function footprintWkt(ring) {
+  const pts = ring.map(([lat, lon]) => `${lon} ${lat}`);
+  if (pts[0] !== pts[pts.length - 1]) pts.push(pts[0]);
+  return `POLYGON((${pts.join(', ')}))`;
+}
+
+// Columns: [header, value-from-scene]. matched_* are only filled for a
+// lat/lon search, naming the query rows (and their lat/lon/date) each
+// scene covers.
+const SCENE_CSV_COLUMNS = [
+  ['scene_id', s => s.id],
+  ['datetime_utc', s => s.time],
+  ['cloud_cover_pct', s => s.cloud_cover],
+  ['bbox_south', s => s.browse_bounds[0][0]],
+  ['bbox_west', s => s.browse_bounds[0][1]],
+  ['bbox_north', s => s.browse_bounds[1][0]],
+  ['bbox_east', s => s.browse_bounds[1][1]],
+  ['footprint_wkt', s => footprintWkt(s.footprint)],
+  ['matched_rows', s => s.matches ? s.matches.map(p => p.n).join(';') : ''],
+  ['matched_points', s => s.matches ? s.matches.map(p => `${p.lat} ${p.lon} ${p.date}`).join('; ') : ''],
+  ['nasa_rfl_url', s => s.rfl_url],
+  ['quicklook_url', s => s.browse_url],
+];
+
+scenesCsvBtn.onclick = () => {
+  if (!currentScenes.length) return;
+  const lines = [SCENE_CSV_COLUMNS.map(c => c[0]).join(',')];
+  currentScenes.forEach(s => lines.push(SCENE_CSV_COLUMNS.map(c => csvField(c[1](s))).join(',')));
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `emit_available_scenes_${new Date().toISOString().slice(0, 16).replace(/[-:]/g, '')}Z.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
 
 /* ---------- search by lat / lon / date ---------- */
 

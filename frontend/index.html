@@ -10,6 +10,9 @@
     .scene-item { cursor:pointer; padding:4px; border-bottom:1px solid #ddd; font-size:13px; }
     .scene-item:hover { background:#eef; }
     .scene-item-active { background:#dde; font-weight:600; }
+    /* Row of a scene under the cursor on the map (see setRowHover in app.js). */
+    .scene-item.scene-item-hover { background:#fff59d; }
+    #scenesCsvBtn { margin:4px 0; }
     #status { display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 2px; color:#555; min-height:1.2em; }
     #status.error { color:#b00020; }
     /* Tied to actual in-flight requests (see setBusy in app.js), so it's
@@ -101,6 +104,7 @@
       <span id="opacityVal">90%</span>
     </div>
 
+    <button id="scenesCsvBtn" type="button" hidden>Download table of available scenes</button>
     <div id="sceneList"></div>
     <button id="downloadCsvBtn" type="button" hidden>Download spectrum as CSV</button>
     <div id="chartFull" class="chart"></div>
