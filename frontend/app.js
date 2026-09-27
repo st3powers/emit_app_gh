@@ -1,6 +1,6 @@
 // frontend/app.js
 // Starts centred on Boise, Idaho.
-const map = L.map('map').setView([43.6150, -116.2023], 9);
+const map = L.map('map').setView([43.6150, -116.2023], 7);
 // crossOrigin so tile images can be read back into a canvas for the "Download
 // map PNG" control below -- OSM's tile server sends Access-Control-Allow-
 // Origin: *, but the browser only takes advantage of that if the <img> asked
